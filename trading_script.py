@@ -13,7 +13,7 @@ SYMBOL = 'ES'
 EXPIRY = '202409'
 EXCHANGE = 'CME'
 TIMEZONE = 'Europe/Zurich'
-DAYS_TO_FETCH = 30
+DAYS_TO_FETCH = 5
 TICK_SIZE = 0.25
 STOP_LOSS_TICKS = 75
 TRADE_AMOUNT = 100
@@ -58,6 +58,29 @@ def convert_to_local(df, timezone):
     local_tz = pytz.timezone(timezone)
     df['date'] = pd.to_datetime(df['date']).dt.tz_convert(local_tz).dt.tz_localize(None)
     df.set_index('date', inplace=True)
+    return df
+
+def calculate_rsi(df, period=14):
+    delta = df['close'].diff(1)
+    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+    rs = gain / loss
+    rsi = 100 - (100 / (1 + rs))
+    df['rsi'] = rsi
+    return df
+
+def calculate_atr(df, period=14):
+    high_low = df['high'] - df['low']
+    high_close = (df['high'] - df['close'].shift()).abs()
+    low_close = (df['low'] - df['close'].shift()).abs()
+    ranges = pd.concat([high_low, high_close, low_close], axis=1)
+    true_range = ranges.max(axis=1)
+    atr = true_range.rolling(window=period).mean()
+    df['atr'] = atr
+    return df
+
+def calculate_ema(df, period=1000):
+    df['ema'] = df['close'].ewm(span=period, adjust=False).mean()
     return df
 
 def calculate_open_position_percentage(prev_daily_high, prev_daily_low, mrkt_open):
@@ -180,7 +203,7 @@ def identify_crossovers(df, trading_data, args):
                 })
     return crossovers
 
-def simulate_trades(df, crossovers, risk_reward_ratio, lookback_period=10):
+def simulate_trades(df, crossovers, risk_reward_ratio):
     trades = []
     in_trade = False
     last_close_time = None
@@ -193,29 +216,27 @@ def simulate_trades(df, crossovers, risk_reward_ratio, lookback_period=10):
         if last_close_time and entry_time <= last_close_time:
             continue
 
+        # Obtenir le prix de clôture de la bougie précédente
+        prev_candle_close = df.loc[entry_time - pd.Timedelta(minutes=1)]['close']
+
         entry_price = df.loc[entry_time]['close']
         level = crossover['crossover_value']
         open_position_pct = crossover['open_position_pct']
         open_vs_prv_close = crossover['open_vs_prv_close']
         open_vs_mdn8t = crossover['open_vs_mdn8t']
+        rsi_value = df.loc[entry_time]['rsi']
+        atr_value = df.loc[entry_time]['atr']
+        ema_value = df.loc[entry_time]['ema']
 
-        lookback_candles = df.loc[df.index < entry_time].tail(lookback_period)
-        if lookback_candles.empty:
-            continue
-
-        trend_up = lookback_candles[lookback_candles['close'] > lookback_candles['open']].shape[0]
-        trend_down = lookback_candles[lookback_candles['close'] < lookback_candles['open']].shape[0]
-
-        if trend_up > trend_down:
-            direction = 'long'
-            stop_loss = entry_price - (STOP_LOSS_TICKS * TICK_SIZE)
-            take_profit = entry_price + (STOP_LOSS_TICKS * risk_reward_ratio * TICK_SIZE)
-        elif trend_down > trend_up:
+        # Décider de la direction (long/short) en fonction de la position de la bougie précédente par rapport au niveau de croisement
+        if prev_candle_close < level:
             direction = 'short'
             stop_loss = entry_price + (STOP_LOSS_TICKS * TICK_SIZE)
             take_profit = entry_price - (STOP_LOSS_TICKS * risk_reward_ratio * TICK_SIZE)
         else:
-            continue
+            direction = 'long'
+            stop_loss = entry_price - (STOP_LOSS_TICKS * TICK_SIZE)
+            take_profit = entry_price + (STOP_LOSS_TICKS * risk_reward_ratio * TICK_SIZE)
 
         in_trade = True
         for index, row in df.loc[df.index >= entry_time].iterrows():
@@ -233,7 +254,10 @@ def simulate_trades(df, crossovers, risk_reward_ratio, lookback_period=10):
                         'crossover_value': crossover['crossover_value'],
                         'open_position_pct': open_position_pct,
                         'open_vs_prv_close': open_vs_prv_close,
-                        'open_vs_mdn8t': open_vs_mdn8t
+                        'open_vs_mdn8t': open_vs_mdn8t,
+                        'rsi': rsi_value,
+                        'atr': atr_value,
+                        'ema': ema_value
                     })
                     in_trade = False
                     last_close_time = row.name
@@ -251,7 +275,10 @@ def simulate_trades(df, crossovers, risk_reward_ratio, lookback_period=10):
                         'crossover_value': crossover['crossover_value'],
                         'open_position_pct': open_position_pct,
                         'open_vs_prv_close': open_vs_prv_close,
-                        'open_vs_mdn8t': open_vs_mdn8t
+                        'open_vs_mdn8t': open_vs_mdn8t,
+                        'rsi': rsi_value,
+                        'atr': atr_value,
+                        'ema': ema_value
                     })
                     in_trade = False
                     last_close_time = row.name
@@ -270,7 +297,10 @@ def simulate_trades(df, crossovers, risk_reward_ratio, lookback_period=10):
                         'crossover_value': crossover['crossover_value'],
                         'open_position_pct': open_position_pct,
                         'open_vs_prv_close': open_vs_prv_close,
-                        'open_vs_mdn8t': open_vs_mdn8t
+                        'open_vs_mdn8t': open_vs_mdn8t,
+                        'rsi': rsi_value,
+                        'atr': atr_value,
+                        'ema': ema_value
                     })
                     in_trade = False
                     last_close_time = row.name
@@ -288,7 +318,10 @@ def simulate_trades(df, crossovers, risk_reward_ratio, lookback_period=10):
                         'crossover_value': crossover['crossover_value'],
                         'open_position_pct': open_position_pct,
                         'open_vs_prv_close': open_vs_prv_close,
-                        'open_vs_mdn8t': open_vs_mdn8t
+                        'open_vs_mdn8t': open_vs_mdn8t,
+                        'rsi': rsi_value,
+                        'atr': atr_value,
+                        'ema': ema_value
                     })
                     in_trade = False
                     last_close_time = row.name
@@ -362,7 +395,7 @@ def calculate_summary(trades, risk_reward_ratio, args):
 def get_last_trading_days(days_to_fetch):
     cme_equity = mcal.get_calendar('CME_Equity')
     end_date = datetime.datetime.now()
-    start_date = end_date - pd.Timedelta(days=300)
+    start_date = end_date - pd.Timedelta(days=200)
     schedule = cme_equity.schedule(start_date=start_date, end_date=end_date)
     trading_days = schedule.index[-(days_to_fetch + 1):].tolist()  # Fetch DAYS_TO_FETCH + 1 days
     return trading_days
@@ -382,6 +415,9 @@ def main():
 
     df = util.df(bars)
     df = convert_to_local(df, TIMEZONE)
+    df = calculate_rsi(df)
+    df = calculate_atr(df)
+    df = calculate_ema(df)
 
     trading_data = calculate_trading_data(df)
     trading_data = add_previous_day_levels(trading_data)
@@ -408,16 +444,16 @@ def main():
 
     if trades:
         print("\nTrades:")
-        header = "{:<20} {:<10} {:<10} {:<10} {:<10} {:<10} {:<20} {:<15} {:<10} {:<15} {:<15} {:<15}".format(
-            "EntryTime", "Price", "SL", "TP", "Direction", "Outcome", "CloseTime", "CrossLevel", "CrossValue", "OpenPosPct", "OpenVsPrvClose", "OpenVsMdn8t"
+        header = "{:<20} {:<10} {:<10} {:<10} {:<10} {:<10} {:<20} {:<15} {:<10} {:<15} {:<15} {:<15} {:<10} {:<10} {:<10}".format(
+            "EntryTime", "Price", "SL", "TP", "Direction", "Outcome", "CloseTime", "CrossLevel", "CrossValue", "OpenPosPct", "OpenVsPrvClose", "OpenVsMdn8t", "RSI", "ATR", "EMA"
         )
         print(header)
         print("-" * len(header))
         for trade in trades:
-            print("{:<20} {:<10.2f} {:<10.2f} {:<10.2f} {:<10} {:<10} {:<20} {:<15} {:<10.2f} {:<15.2f} {:<15.2f} {:<15.2f}".format(
+            print("{:<20} {:<10.2f} {:<10.2f} {:<10.2f} {:<10} {:<10} {:<20} {:<15} {:<10.2f} {:<15.2f} {:<15.2f} {:<15.2f} {:<10.2f} {:<10.2f} {:<10.2f}".format(
                 trade['entry_time'].strftime('%Y-%m-%d %H:%M:%S'), trade['entry_price'], trade['stop_loss'], trade['take_profit'],
                 trade['direction'], trade['outcome'], trade['close_time'].strftime('%Y-%m-%d %H:%M:%S'), trade['crossover'], trade['crossover_value'],
-                trade['open_position_pct'], trade['open_vs_prv_close'], trade['open_vs_mdn8t']
+                trade['open_position_pct'], trade['open_vs_prv_close'], trade['open_vs_mdn8t'], trade['rsi'], trade['atr'], trade['ema']
             ))
 
     ib.disconnect()
